@@ -56,6 +56,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1206,6 +1207,23 @@ public class ParameterContextIT extends NiFiSystemIT {
         assertTrue(inheritedParameter.getParameter().getInherited());
         assertEquals("parent-value", inheritedParameter.getParameter().getValue());
         assertEquals(parentContext.getId(), inheritedParameter.getParameter().getParameterContext().getId());
+    }
+
+    @Test
+    public void testUpdateReferencedLocalParameterPreservesRawReference() throws NiFiClientException, IOException, InterruptedException {
+        final ParameterContextEntity context = getClientUtil().createParameterContext("localReferenceContext",
+                Map.of("X", "original", "Y", "#{X}"));
+
+        final ParameterContextUpdateRequestEntity updateRequest = updateParameterContext(context, "X", "updated");
+        getClientUtil().waitForParameterContextRequestToComplete(context.getId(), updateRequest.getRequest().getRequestId());
+
+        final ParameterContextEntity updatedContext = getNifiClient().getParamContextClient().getParamContext(context.getId(), false);
+        final Map<String, ParameterDTO> parameters = updatedContext.getComponent().getParameters().stream()
+                .map(ParameterEntity::getParameter)
+                .collect(Collectors.toMap(ParameterDTO::getName, Function.identity()));
+
+        assertEquals("updated", parameters.get("X").getValue());
+        assertEquals("#{X}", parameters.get("Y").getValue());
     }
 
     @Test
