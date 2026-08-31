@@ -1182,7 +1182,7 @@ public class ParameterContextIT extends NiFiSystemIT {
                 .findFirst()
                 .orElse(null);
         assertNotNull(localOverride);
-        assertFalse(Boolean.TRUE.equals(localOverride.getParameter().getInherited()));
+        assertFalse(localOverride.getParameter().getInherited());
         assertEquals("child-value", localOverride.getParameter().getValue());
 
         final ParameterDTO deletionDto = new ParameterDTO();
