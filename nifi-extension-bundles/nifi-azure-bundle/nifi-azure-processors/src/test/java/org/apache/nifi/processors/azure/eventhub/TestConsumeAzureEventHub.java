@@ -21,6 +21,7 @@ import com.azure.messaging.eventhubs.EventData;
 import com.azure.messaging.eventhubs.EventProcessorClient;
 import com.azure.messaging.eventhubs.models.Checkpoint;
 import com.azure.messaging.eventhubs.models.EventBatchContext;
+import com.azure.messaging.eventhubs.models.LastEnqueuedEventProperties;
 import com.azure.messaging.eventhubs.models.PartitionContext;
 import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.flowfile.FlowFile;
@@ -68,6 +69,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -358,6 +360,38 @@ public class TestConsumeAzureEventHub {
 
         final List<ProvenanceEventRecord> provenanceEvents = testRunner.getProvenanceEvents();
         assertEquals(2, provenanceEvents.size());
+    }
+
+    @Test
+    public void testReceiveBatchWritesEachEventSequence() {
+        setProperties();
+        testRunner.run(1, false);
+
+        final Instant firstEnqueuedTime = Instant.parse("2026-11-16T16:00:00Z");
+        final Instant secondEnqueuedTime = Instant.parse("2026-11-16T16:00:01Z");
+        final Instant partitionHeadEnqueuedTime = Instant.parse("2026-11-16T16:05:00Z");
+        final List<EventData> events = List.of(
+                eventWithPosition(FIRST_CONTENT, 10L, "100", firstEnqueuedTime),
+                eventWithPosition(SECOND_CONTENT, 11L, "110", secondEnqueuedTime)
+        );
+        final LastEnqueuedEventProperties partitionHead = new LastEnqueuedEventProperties(50L, "500", partitionHeadEnqueuedTime, partitionHeadEnqueuedTime);
+        final EventBatchContext eventBatchContext = new EventBatchContext(partitionContext, events, checkpointStore, partitionHead);
+        processor.eventBatchProcessor.accept(eventBatchContext);
+
+        final List<MockFlowFile> flowFiles = testRunner.getFlowFilesForRelationship(ConsumeAzureEventHub.REL_SUCCESS);
+        assertEquals(2, flowFiles.size());
+
+        final MockFlowFile first = flowFiles.get(0);
+        first.assertContentEquals(FIRST_CONTENT);
+        first.assertAttributeEquals("eventhub.sequence", "10");
+        first.assertAttributeEquals("eventhub.offset", "100");
+        first.assertAttributeEquals("eventhub.enqueued.timestamp", String.valueOf(firstEnqueuedTime));
+
+        final MockFlowFile second = flowFiles.get(1);
+        second.assertContentEquals(SECOND_CONTENT);
+        second.assertAttributeEquals("eventhub.sequence", "11");
+        second.assertAttributeEquals("eventhub.offset", "110");
+        second.assertAttributeEquals("eventhub.enqueued.timestamp", String.valueOf(secondEnqueuedTime));
     }
 
     @Test
@@ -668,6 +702,25 @@ public class TestConsumeAzureEventHub {
         flowFile.assertAttributeEquals("eventhub.name", EVENT_HUB_NAME);
         flowFile.assertAttributeEquals("eventhub.partition", PARTITION_ID);
         flowFile.assertAttributeEquals(APPLICATION_ATTRIBUTE_NAME, MockConsumeAzureEventHub.class.getSimpleName());
+    }
+
+    private static EventData eventWithPosition(final String content, final long sequenceNumber, final String offset, final Instant enqueuedTime) {
+        return new EventData(content) {
+            @Override
+            public Long getSequenceNumber() {
+                return sequenceNumber;
+            }
+
+            @Override
+            public String getOffsetString() {
+                return offset;
+            }
+
+            @Override
+            public Instant getEnqueuedTime() {
+                return enqueuedTime;
+            }
+        };
     }
 
     private List<EventData> getEvents(final String... contents) {

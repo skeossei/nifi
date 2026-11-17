@@ -34,7 +34,6 @@ import com.azure.messaging.eventhubs.checkpointstore.blob.BlobCheckpointStore;
 import com.azure.messaging.eventhubs.models.ErrorContext;
 import com.azure.messaging.eventhubs.models.EventBatchContext;
 import com.azure.messaging.eventhubs.models.EventPosition;
-import com.azure.messaging.eventhubs.models.LastEnqueuedEventProperties;
 import com.azure.messaging.eventhubs.models.PartitionContext;
 import com.azure.storage.blob.BlobContainerAsyncClient;
 import com.azure.storage.blob.BlobContainerClientBuilder;
@@ -625,7 +624,6 @@ public class ConsumeAzureEventHub extends AbstractSessionFactoryProcessor implem
                 .transportType(transportType)
                 .consumerGroup(consumerGroup)
                 .clientOptions(new AmqpClientOptions().setIdentifier(clientId))
-                .trackLastEnqueuedEventProperties(true)
                 .checkpointStore(checkpointStore)
                 .processError(errorProcessor)
                 .processEventBatch(eventBatchProcessor, maxBatchSize, maxWaitTime);
@@ -757,14 +755,11 @@ public class ConsumeAzureEventHub extends AbstractSessionFactoryProcessor implem
     private void putEventHubAttributes(
             final Map<String, String> attributes,
             final PartitionContext partitionContext,
-            final EventData eventData,
-            final LastEnqueuedEventProperties lastEnqueuedEventProperties
+            final EventData eventData
     ) {
-        if (lastEnqueuedEventProperties != null) {
-            attributes.put("eventhub.enqueued.timestamp", String.valueOf(lastEnqueuedEventProperties.getEnqueuedTime()));
-            attributes.put("eventhub.offset", lastEnqueuedEventProperties.getOffsetString());
-            attributes.put("eventhub.sequence", String.valueOf(lastEnqueuedEventProperties.getSequenceNumber()));
-        }
+        attributes.put("eventhub.enqueued.timestamp", String.valueOf(eventData.getEnqueuedTime()));
+        attributes.put("eventhub.offset", eventData.getOffsetString());
+        attributes.put("eventhub.sequence", String.valueOf(eventData.getSequenceNumber()));
 
         final Map<String, String> applicationProperties = AzureEventHubUtils.getApplicationProperties(eventData.getProperties());
         attributes.putAll(applicationProperties);
@@ -782,7 +777,7 @@ public class ConsumeAzureEventHub extends AbstractSessionFactoryProcessor implem
         final List<EventData> events = eventBatchContext.getEvents();
         events.forEach(eventData -> {
             final Map<String, String> attributes = new HashMap<>();
-            putEventHubAttributes(attributes, partitionContext, eventData, eventBatchContext.getLastEnqueuedEventProperties());
+            putEventHubAttributes(attributes, partitionContext, eventData);
 
             FlowFile flowFile = session.create();
             flowFile = session.putAllAttributes(flowFile, attributes);
@@ -808,11 +803,10 @@ public class ConsumeAzureEventHub extends AbstractSessionFactoryProcessor implem
         final Map<String, String> attributes = new HashMap<>();
 
         RecordSetWriter writer = null;
-        EventData lastEventData = null;
+        EventData firstEventData = null;
         WriteResult lastWriteResult = null;
         int recordCount = 0;
 
-        final LastEnqueuedEventProperties lastEnqueuedEventProperties = eventBatchContext.getLastEnqueuedEventProperties();
         final List<EventData> events = eventBatchContext.getEvents();
 
         try (final OutputStream out = session.write(flowFile)) {
@@ -836,21 +830,23 @@ public class ConsumeAzureEventHub extends AbstractSessionFactoryProcessor implem
                         recordCount += lastWriteResult.getRecordCount();
                     }
 
-                    lastEventData = eventData;
-
+                    if (firstEventData == null) {
+                        firstEventData = eventData;
+                    }
                 } catch (Exception e) {
                     // Write it to the parse failure relationship.
                     logger.error("Failed to parse message from Azure Event Hub using configured Record Reader and Writer", e);
                     FlowFile failed = session.create();
                     session.write(failed, o -> o.write(eventData.getBody()));
-                    putEventHubAttributes(attributes, partitionContext, eventData, lastEnqueuedEventProperties);
-                    failed = session.putAllAttributes(failed, attributes);
+                    final Map<String, String> failureAttributes = new HashMap<>();
+                    putEventHubAttributes(failureAttributes, partitionContext, eventData);
+                    failed = session.putAllAttributes(failed, failureAttributes);
                     transferTo(REL_PARSE_FAILURE, session, stopWatch, partitionContext, failed);
                 }
             }
 
-            if (lastEventData != null) {
-                putEventHubAttributes(attributes, partitionContext, lastEventData, lastEnqueuedEventProperties);
+            if (firstEventData != null) {
+                putEventHubAttributes(attributes, partitionContext, firstEventData);
 
                 attributes.put("record.count", String.valueOf(recordCount));
                 if (writer != null) {
@@ -869,7 +865,7 @@ public class ConsumeAzureEventHub extends AbstractSessionFactoryProcessor implem
             }
         }
 
-        if (lastEventData == null) {
+        if (firstEventData == null) {
             session.remove(flowFile);
         } else {
             flowFile = session.putAllAttributes(flowFile, attributes);
